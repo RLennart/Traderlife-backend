@@ -1,66 +1,7 @@
-# TraderLife 📊
+# TraderLife — Secret GARRda Edition 📊
 
 KI-gestütztes Analyse-Tool für Aktien, ETFs und Krypto.  
-Mobile-optimiert · Kostenlos hostbar
-
----
-
-## Schnellstart (lokal testen)
-
-### 1. Backend starten
-
-```bash
-cd backend
-pip install -r requirements.txt
-set GEMINI_API_KEY=dein-key-hier   # Windows
-# export GEMINI_API_KEY=dein-key  # Mac/Linux
-uvicorn main:app --reload
-```
-
-Backend läuft auf http://localhost:8000
-
-### 2. Frontend starten
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Frontend läuft auf http://localhost:5173
-
----
-
-## Gemini API Key holen (kostenlos)
-
-1. Gehe zu https://aistudio.google.com/app/apikey
-2. Klicke "Create API Key"
-3. Kopiere den Key und setze ihn als Umgebungsvariable (s.o.)
-
-Das **Gemini 1.5 Flash** Modell ist kostenlos: 1 Million Tokens/Tag, 15 Anfragen/Minute.
-
----
-
-## Deployment (kostenlos, vom Handy erreichbar)
-
-### Backend → Render.com
-
-1. GitHub-Account erstellen (falls nicht vorhanden)
-2. Repo erstellen und den `backend/`-Ordner hochladen
-3. Auf https://render.com einloggen
-4. "New Web Service" → GitHub-Repo auswählen
-5. Build Command: `pip install -r requirements.txt`
-6. Start Command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-7. Environment Variable hinzufügen: `GEMINI_API_KEY` = dein Key
-8. Deploy klicken → du bekommst eine URL wie `https://traderlife-api.onrender.com`
-
-### Frontend → Vercel.com
-
-1. Den `frontend/`-Ordner in ein eigenes GitHub-Repo pushen
-2. Auf https://vercel.com einloggen (kostenlos mit GitHub)
-3. "Add New Project" → Repo auswählen
-4. Environment Variable setzen: `VITE_API_URL` = `https://traderlife-api.onrender.com/api`
-5. Deploy → du bekommst eine URL, die vom Handy erreichbar ist
+Mobile-optimiert · Kostenlos hostbar auf Railway · Powered by Gemini 2.5 Flash
 
 ---
 
@@ -69,31 +10,68 @@ Das **Gemini 1.5 Flash** Modell ist kostenlos: 1 Million Tokens/Tag, 15 Anfragen
 ```
 trader life/
 ├── backend/
-│   ├── main.py          # FastAPI Backend (Daten + AI)
+│   ├── main.py              # FastAPI Backend (Daten + AI)
+│   ├── static/
+│   │   └── index.html       # Single-File Frontend (React via CDN)
 │   ├── requirements.txt
-│   └── render.yaml      # Render-Konfiguration
-└── frontend/
-    ├── src/
-    │   ├── App.jsx           # Haupt-App
-    │   ├── api.js            # API-Aufrufe
-    │   └── components/
-    │       ├── SearchBar.jsx     # Asset-Suche
-    │       ├── CandleChart.jsx   # TradingView Chart
-    │       ├── SignalCard.jsx    # KI-Signal Anzeige
-    │       └── IndicatorPanel.jsx # Indikatoren
-    ├── package.json
-    └── vite.config.js
+│   ├── Dockerfile
+│   ├── render.yaml
+│   ├── check_models.py      # Gemini-Modell Tester
+│   └── debug_data.py        # Datenquellen-Debugger
+├── STARTEN.bat              # Lokaler Start (Windows)
+└── README.md
 ```
+
+---
+
+## Lokaler Start
+
+Doppelklick auf **`STARTEN.bat`** — installiert Pakete automatisch und öffnet den Browser auf http://localhost:8000
+
+Manuell:
+```bash
+cd backend
+pip install -r requirements.txt
+set GEMINI_API_KEY=dein-key
+uvicorn main:app --reload
+```
+
+---
+
+## Gemini API Key
+
+1. [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey) → "Create API Key"
+2. Key in `backend/.env` eintragen: `GEMINI_API_KEY=dein-key`
+3. Oder als Railway Environment Variable setzen
+
+**Free Tier:** Gemini 2.5 Flash — 500 Anfragen/Tag kostenlos.
+
+---
+
+## Deployment (Railway.app)
+
+1. Repo auf GitHub pushen
+2. [railway.app](https://railway.app) → "Deploy from GitHub"
+3. Variable: `GEMINI_API_KEY` = dein Key
+4. Settings → Networking → "Generate Domain"
+
+---
 
 ## Features
 
-- **Candlestick Chart** mit SMA20 (TradingView Lightweight Charts)
-- **KI-Signal**: BUY / SELL / HOLD mit Konfidenz, Begründung, Kursziele (Gemini Flash)
-- **Technische Indikatoren**: RSI, MACD, Bollinger Bands, SMA20/50/200
-- **Fundamentaldaten**: KGV, EPS, Beta, Marktkapitalisierung, Dividende
-- **Suche**: Aktien, ETFs und Krypto
-- **Mobile-first** Design
+| Feature | Details |
+|---|---|
+| **Charts** | Candlestick + SMA20/50, Intervalle 1D/1H/15M/5M/1M |
+| **Indikatoren** | RSI(14), MACD(12,26,9), Bollinger Bands, SMA20/50/200 |
+| **Fundamentaldaten** | KGV, EPS, Beta, Marktkapitalisierung, Dividende |
+| **KI-Signal** | BUY/SELL/HOLD mit Konfidenz, Kursziele, Begründung |
+| **News** | Reuters, Yahoo Finance, CNBC, MarketWatch, FT — asset-spezifisch |
+| **News-Sentiment** | KI-Bewertung -- bis ++ mit Zeitskala |
+| **Assets** | Aktien, ETFs, Krypto (CoinGecko) |
+| **AI-Modell** | Gemini 2.5 Flash |
+
+---
 
 ## Disclaimer
 
-Keine Anlageberatung. Alle Signale sind algorithmisch generiert und dienen nur zu Informationszwecken.
+Keine Anlageberatung. Alle Signale dienen nur zu Informationszwecken. Investitionsentscheidungen auf eigenes Risiko.

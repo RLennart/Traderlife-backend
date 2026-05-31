@@ -36,8 +36,8 @@ async function apiSearch(q) {
   const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
   return r.json();
 }
-async function apiData(type, id, period = '6mo') {
-  const r = await fetch(`/api/data/${type}/${encodeURIComponent(id)}?period=${period}`);
+async function apiData(type, id, period = '6mo', interval = '1d') {
+  const r = await fetch(`/api/data/${type}/${encodeURIComponent(id)}?period=${period}&interval=${interval}`);
   if (!r.ok) { const t = await r.text(); throw new Error(t); }
   return r.json();
 }
@@ -123,10 +123,29 @@ function seriesFromIndicator(candles, raw) {
   }).filter(Boolean);
 }
 
+// ─── INTERVAL CONFIG ─────────────────────────────────────────────────────────
+// [label, period, interval, minBarsToSwitch]
+const INTERVALS = [
+  { label: '1D',  period: '2y',  interval: '1d',  minBars: 0   },
+  { label: '1H',  period: '3mo', interval: '1h',  minBars: 0   },
+  { label: '15M', period: '5d',  interval: '15m', minBars: 0   },
+  { label: '5M',  period: '1d',  interval: '5m',  minBars: 0   },
+  { label: '1M',  period: '1d',  interval: '1m',  minBars: 0   },
+];
+// Sichtbare Bars → Intervall-Index (je weniger Bars sichtbar, desto feiner)
+function getIntervalIdx(visibleBars) {
+  if (visibleBars <= 30)  return 4; // 1m
+  if (visibleBars <= 80)  return 3; // 5m
+  if (visibleBars <= 200) return 2; // 15m
+  if (visibleBars <= 600) return 1; // 1h
+  return 0;                          // 1d
+}
+
 // ─── CANDLE CHART ────────────────────────────────────────────────────────────
-function CandleChart({ candles, indicators }) {
+function CandleChart({ candles, indicators, assetType, assetId, onIntervalChange, currentInterval }) {
   const ref = useRef(null);
   const chartRef = useRef(null);
+  const switchingRef = useRef(false);
 
   useEffect(() => {
     if (!ref.current || !candles?.length) return;
@@ -142,13 +161,36 @@ function CandleChart({ candles, indicators }) {
     });
     cs.setData(candles);
 
-    const sma20Data = seriesFromIndicator(candles, indicators?.series?.sma20);
-    if (sma20Data.length) {
-      chart.addLineSeries({ color: '#60a5fa', lineWidth: 1, title: 'SMA20' }).setData(sma20Data);
+    // SMAs — berechne aus den vorhandenen Candles falls series fehlt
+    const closes = candles.map(c => c.value ?? c.close);
+    function calcSMA(n) {
+      return candles.map((c, i) => {
+        if (i < n - 1) return null;
+        const avg = closes.slice(i - n + 1, i + 1).reduce((a, b) => a + b, 0) / n;
+        return { time: c.time, value: parseFloat(avg.toFixed(4)) };
+      }).filter(Boolean);
     }
+    const sma20Data = seriesFromIndicator(candles, indicators?.series?.sma20);
+    const sma20Final = sma20Data.length ? sma20Data : calcSMA(20);
+    if (sma20Final.length) chart.addLineSeries({ color: '#60a5fa', lineWidth: 1, title: 'SMA20', priceLineVisible: false }).setData(sma20Final);
+
     const sma50Data = seriesFromIndicator(candles, indicators?.series?.sma50);
-    if (sma50Data.length) {
-      chart.addLineSeries({ color: '#f59e0b', lineWidth: 1, title: 'SMA50' }).setData(sma50Data);
+    const sma50Final = sma50Data.length ? sma50Data : calcSMA(50);
+    if (sma50Final.length) chart.addLineSeries({ color: '#f59e0b', lineWidth: 1, title: 'SMA50', priceLineVisible: false }).setData(sma50Final);
+
+    // Auto-Zoom-Switch
+    if (onIntervalChange && assetType === 'stock') {
+      chart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+        if (!range || switchingRef.current) return;
+        const visible = Math.round(range.to - range.from);
+        const targetIdx = getIntervalIdx(visible);
+        const currentIdx = INTERVALS.findIndex(iv => iv.interval === (currentInterval || '1d'));
+        if (targetIdx !== currentIdx && targetIdx >= 0) {
+          switchingRef.current = true;
+          setTimeout(() => { switchingRef.current = false; }, 2000);
+          onIntervalChange(INTERVALS[targetIdx]);
+        }
+      });
     }
 
     const ro = new ResizeObserver(() => ref.current && chart.applyOptions({ width: ref.current.clientWidth }));
@@ -157,7 +199,22 @@ function CandleChart({ candles, indicators }) {
     return () => { ro.disconnect(); chart.remove(); chartRef.current = null; };
   }, [candles, indicators]);
 
-  return e('div', { ref, className: 'w-full rounded-xl overflow-hidden' });
+  return e('div', { className: 'space-y-1' },
+    e('div', { className: 'flex items-center gap-2 px-1 flex-wrap' },
+      e('span', { className: 'text-xs text-gray-500' }, 'Interval:'),
+      INTERVALS.map(iv => e('button', {
+        key: iv.interval,
+        onClick: () => onIntervalChange && onIntervalChange(iv),
+        className: `text-xs px-2 py-0.5 rounded font-medium transition-colors ${
+          (currentInterval || '1d') === iv.interval
+            ? 'bg-blue-600 text-white'
+            : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+        } ${assetType === 'crypto' && iv.interval !== '1d' ? 'opacity-30 cursor-not-allowed' : ''}`
+      }, iv.label)),
+      e('span', { className: 'text-xs text-gray-600 ml-auto' }, '← zoom für feinere Kerzen')
+    ),
+    e('div', { ref, className: 'w-full rounded-xl overflow-hidden' })
+  );
 }
 
 // ─── RSI CHART ────────────────────────────────────────────────────────────────
@@ -357,29 +414,83 @@ function IndicatorPanel({ ind, fund }) {
 }
 
 // ─── NEWS TAB ────────────────────────────────────────────────────────────────
-function NewsTab({ news, symbol }) {
+const SENTIMENT_CONFIG = {
+  "--": { label: "Stark Bearish", color: "text-red-400",   bg: "bg-red-950 border-red-700",    emoji: "📉📉" },
+  "-":  { label: "Bearish",       color: "text-orange-400", bg: "bg-orange-950 border-orange-700", emoji: "📉" },
+  "_":  { label: "Neutral",       color: "text-gray-300",  bg: "bg-gray-800 border-gray-600",  emoji: "➡️" },
+  "+":  { label: "Bullish",       color: "text-green-400", bg: "bg-green-950 border-green-700",emoji: "📈" },
+  "++": { label: "Stark Bullisch",color: "text-emerald-400",bg:"bg-emerald-950 border-emerald-700",emoji:"📈📈"},
+};
+
+function NewsTab({ news, symbol, fundamentals, model }) {
+  const [sentiment, setSentiment] = useState(null);
+  const [sentLoading, setSentLoading] = useState(false);
+  const [sentError, setSentError] = useState(null);
+
+  async function loadSentiment() {
+    if (!news?.length) return;
+    setSentLoading(true); setSentError(null);
+    try {
+      const r = await fetch(`/api/news-sentiment/${encodeURIComponent(symbol)}`, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ articles: news, name: fundamentals?.name || symbol, model }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      setSentiment(await r.json());
+    } catch(err) { setSentError('Fehler: ' + err.message); }
+    setSentLoading(false);
+  }
+
   if (!news?.length) return e('div', { className: 'bg-gray-900 rounded-2xl border border-gray-800 p-8 text-center' },
     e('div', { className: 'text-4xl mb-3' }, '📭'),
-    e('p', { className: 'text-gray-400 text-sm' }, 'Keine Nachrichten gefunden für ' + symbol)
+    e('p', { className: 'text-gray-400 text-sm' }, 'Keine Nachrichten gefunden')
   );
 
+  const sc = sentiment ? SENTIMENT_CONFIG[sentiment.sentiment] || SENTIMENT_CONFIG['_'] : null;
+
   return e('div', { className: 'space-y-3' },
-    e('div', { className: 'flex items-center justify-between' },
-      e('h3', { className: 'text-sm font-semibold text-gray-400 uppercase tracking-wider' }, `📰 ${news.length} aktuelle Nachrichten`),
-      e('span', { className: 'text-xs text-gray-600' }, 'Reuters · Yahoo Finance · CNBC · MarketWatch')
+
+    // Sentiment Button + Result
+    e('div', { className: 'bg-gray-900 border border-gray-800 rounded-2xl p-4 space-y-3' },
+      e('div', { className: 'flex items-center justify-between flex-wrap gap-2' },
+        e('span', { className: 'text-xs font-semibold text-gray-400 uppercase tracking-wider' }, `📰 ${news.length} Nachrichten`),
+        e('button', {
+          onClick: loadSentiment,
+          disabled: sentLoading,
+          className: `text-xs px-4 py-2 rounded-xl font-semibold transition-colors ${sentLoading ? 'bg-gray-700 text-gray-500' : 'bg-purple-700 hover:bg-purple-600 text-white'}`,
+        }, sentLoading ? '⏳ Analysiere…' : '🤖 News-Sentiment')
+      ),
+      sentError && e('div', { className: 'text-red-400 text-xs' }, sentError),
+      sc && e('div', { className: `border rounded-2xl p-4 ${sc.bg}` },
+        e('div', { className: 'flex items-center gap-3 mb-2' },
+          e('span', { className: 'text-2xl' }, sc.emoji),
+          e('div', null,
+            e('div', { className: `text-xl font-black ${sc.color}` }, sentiment.sentiment + '  ' + sc.label),
+            e('div', { className: 'text-xs text-gray-400' }, '⏱ ' + (sentiment.timeframe || '')),
+          ),
+        ),
+        e('p', { className: 'text-gray-300 text-sm mb-3' }, sentiment.summary),
+        sentiment.keyPoints?.length && e('ul', { className: 'space-y-1' },
+          sentiment.keyPoints.map((pt, i) =>
+            e('li', { key: i, className: 'text-xs text-gray-400 flex gap-2' },
+              e('span', { className: sc.color }, '•'), pt
+            )
+          )
+        )
+      )
     ),
+
+    // Artikel-Liste
     ...news.map((article, i) =>
       e('a', {
-        key: i,
-        href: article.link || '#',
-        target: '_blank',
-        rel: 'noopener noreferrer',
-        className: 'block bg-gray-900 border border-gray-800 hover:border-gray-600 rounded-2xl p-4 transition-colors group'
+        key: i, href: article.link || '#', target: '_blank', rel: 'noopener noreferrer',
+        className: 'block bg-gray-900 border border-gray-800 hover:border-gray-600 rounded-2xl p-4 transition-colors group',
       },
         e('div', { className: 'flex items-start justify-between gap-3 mb-2' },
           e('span', { className: 'text-xs bg-gray-800 text-blue-300 px-2 py-0.5 rounded-full whitespace-nowrap' }, article.source),
           article.published && e('span', { className: 'text-xs text-gray-600 whitespace-nowrap' },
-            (() => { try { return new Date(article.published).toLocaleDateString('de-DE', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }); } catch { return ''; } })()
+            (() => { try { return new Date(article.published).toLocaleDateString('de-DE', {day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}); } catch { return ''; } })()
           )
         ),
         e('h4', { className: 'font-semibold text-sm text-white group-hover:text-blue-400 transition-colors mb-1 leading-snug' }, article.title),
@@ -431,6 +542,25 @@ function ModelSelector({ value, onChange }) {
 }
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
+// ─── FOOTER ──────────────────────────────────────────────────────────────────
+function Footer() {
+  const [info, setInfo] = useState(null);
+  useEffect(() => {
+    fetch('/health').then(r => r.json()).then(d => setInfo(d)).catch(() => {});
+  }, []);
+
+  const buildDate = info?.timestamp
+    ? new Date(info.timestamp).toLocaleDateString('de-DE', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'})
+    : null;
+
+  return e('footer', { className: 'text-center text-gray-700 text-xs py-6 space-y-1' },
+    e('div', null, 'TraderLife · Secret GARRda Edition · Keine Anlageberatung · Auf eigenes Risiko'),
+    info && e('div', { className: 'text-gray-800' },
+      `Server: ${buildDate} · Modell: ${info.model || 'gemini-2.5-flash'}`
+    )
+  );
+}
+
 const PERIODS = [['1M','1mo'],['3M','3mo'],['6M','6mo'],['1J','1y'],['2J','2y']];
 const QUICK = [
   { type:'stock', id:'AAPL', name:'Apple' },
@@ -448,7 +578,9 @@ function App() {
   const [period, setPeriod] = useState('6mo');
   const [active, setActive] = useState(null);
   const [tab, setTab] = useState('chart');
-  const [model, setModel] = useState('gemini-1.5-flash');
+  const [model] = useState('gemini-2.5-flash');
+
+  const [interval, setInterval] = useState('1d');
 
   // KI-State
   const [signal, setSignal] = useState(null);
@@ -456,16 +588,23 @@ function App() {
   const [signalError, setSignalError] = useState(null);
   const [userContext, setUserContext] = useState('');
 
-  async function load(asset, p) {
+  async function load(asset, p, iv) {
     const per = p || period;
+    const ivl = iv || interval;
     setLoading(true); setError(null); setSignal(null);
     try {
-      const result = await apiData(asset.type, asset.id, per);
+      const result = await apiData(asset.type, asset.id, per, ivl);
       setData(result); setActive(asset);
     } catch(err) {
       setError('Fehler beim Laden: ' + err.message);
     }
     setLoading(false);
+  }
+
+  function handleIntervalChange(iv) {
+    setInterval(iv.interval);
+    setPeriod(iv.period);
+    if (active) load(active, iv.period, iv.interval);
   }
 
   async function runSignal() {
@@ -496,12 +635,15 @@ function App() {
     // HEADER
     e('header', { className: 'border-b border-gray-800 px-4 py-4 sticky top-0 z-40', style: { background: 'rgba(3,7,18,0.96)', backdropFilter: 'blur(8px)' } },
       e('div', { className: 'max-w-4xl mx-auto flex items-center gap-3' },
-        e('div', { className: 'text-xl font-black whitespace-nowrap' },
-          e('span', { className: 'text-blue-400' }, 'Trader'),
-          e('span', { className: 'text-white' }, 'Life')
+        e('div', { className: 'whitespace-nowrap' },
+          e('div', { className: 'text-xl font-black leading-tight' },
+            e('span', { className: 'text-blue-400' }, 'Trader'),
+            e('span', { className: 'text-white' }, 'Life')
+          ),
+          e('div', { className: 'text-xs text-purple-400 font-medium tracking-wide leading-tight' }, 'Secret GARRda Edition')
         ),
         e(SearchBar, { onSelect: (a) => { setTab('chart'); load(a); } }),
-        e(ModelSelector, { value: model, onChange: (m) => setModel(m) })
+        e('span', { className: 'text-xs text-gray-600 hidden sm:block whitespace-nowrap' }, '🤖 gemini-2.5-flash')
       )
     ),
 
@@ -571,7 +713,7 @@ function App() {
 
         // Tab content
         tab === 'chart' && e('div', { className: 'bg-gray-900 rounded-2xl border border-gray-800 p-4 space-y-4' },
-          e(CandleChart, { candles: data.candles, indicators: data.indicators }),
+          e(CandleChart, { candles: data.candles, indicators: data.indicators, assetType: active?.type, assetId: active?.id, onIntervalChange: handleIntervalChange, currentInterval: interval }),
           e('div', { className: 'border-t border-gray-800 pt-3' }, e(RSIChart, { candles: data.candles, indicators: data.indicators })),
           e('div', { className: 'border-t border-gray-800 pt-3' }, e(MACDChart, { candles: data.candles, indicators: data.indicators })),
         ),
@@ -605,7 +747,7 @@ function App() {
         tab === 'indicators' && e('div', { className: 'bg-gray-900 rounded-2xl border border-gray-800 p-5' },
           e(IndicatorPanel, { ind: data.indicators, fund: data.fundamentals })
         ),
-        tab === 'news' && e(NewsTab, { news: data.news, symbol: data.symbol || data.coin }),
+        tab === 'news' && e(NewsTab, { news: data.news, symbol: data.symbol || data.coin, fundamentals: data.fundamentals, model }),
 
         // Daten neu laden
         e('button', {
@@ -615,7 +757,7 @@ function App() {
       )
     ),
 
-    e('footer', { className: 'text-center text-gray-700 text-xs py-6' }, 'TraderLife · Keine Anlageberatung · Auf eigenes Risiko')
+    e(Footer)
   );
 }
 
