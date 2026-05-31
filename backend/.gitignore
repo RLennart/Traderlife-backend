@@ -1,0 +1,5 @@
+.env
+.installed
+best_model.json
+__pycache__/
+*.pyc

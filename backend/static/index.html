@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TraderLife 📊</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: { extend: { colors: { buy: '#22c55e', sell: '#ef4444', hold: '#f59e0b' } } }
+}
+</script>
+<style>
+  body { background: #030712; color: #f3f4f6; font-family: system-ui, sans-serif; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: #111827; }
+  ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 2px; }
+  .spinner { border: 3px solid #1f2937; border-top-color: #3b82f6; border-radius: 50%; width: 36px; height: 36px; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .pulse { animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const { useState, useEffect, useRef, useCallback } = React;
+const e = React.createElement;
+
+// ─── API ─────────────────────────────────────────────────────────────────────
+async function apiSearch(q) {
+  const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+  return r.json();
+}
+async function apiData(type, id, period = '6mo') {
+  const r = await fetch(`/api/data/${type}/${encodeURIComponent(id)}?period=${period}`);
+  if (!r.ok) { const t = await r.text(); throw new Error(t); }
+  return r.json();
+}
+async function apiSignal(type, id, payload) {
+  const r = await fetch(`/api/signal/${type}/${encodeURIComponent(id)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) { const t = await r.text(); throw new Error(t); }
+  return r.json();
+}
+async function apiModels() {
+  const r = await fetch('/api/models');
+  return r.json();
+}
+
+// ─── SEARCH BAR ──────────────────────────────────────────────────────────────
+function SearchBar({ onSelect }) {
+  const [q, setQ] = useState('');
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const timer = useRef(null);
+
+  const search = (val) => {
+    clearTimeout(timer.current);
+    if (!val.trim()) { setResults([]); return; }
+    timer.current = setTimeout(async () => {
+      setLoading(true);
+      try { const d = await apiSearch(val); setResults(d.results || []); }
+      catch {}
+      setLoading(false);
+    }, 400);
+  };
+
+  return e('div', { className: 'relative w-full max-w-xl' },
+    e('div', { className: 'flex items-center gap-2 bg-gray-800 rounded-xl px-4 py-3 border border-gray-700' },
+      e('span', { className: 'text-gray-400 text-lg' }, '🔍'),
+      e('input', {
+        className: 'flex-1 bg-transparent outline-none text-sm placeholder-gray-500 text-white',
+        placeholder: 'Aktie, ETF oder Krypto... (z.B. AAPL, bitcoin)',
+        value: q,
+        onChange: (ev) => { setQ(ev.target.value); search(ev.target.value); }
+      }),
+      loading && e('span', { className: 'text-gray-500 text-xs pulse' }, '…')
+    ),
+    results.length > 0 && e('ul', {
+      className: 'absolute z-50 mt-1 w-full bg-gray-800 border border-gray-700 rounded-xl overflow-hidden shadow-2xl'
+    }, results.map((r, i) =>
+      e('li', {
+        key: i,
+        className: 'flex items-center justify-between px-4 py-3 hover:bg-gray-700 cursor-pointer transition-colors',
+        onClick: () => { onSelect(r); setQ(r.name || r.id); setResults([]); }
+      },
+        e('div', null,
+          e('span', { className: 'font-semibold text-sm text-white' }, r.name),
+          e('span', { className: 'ml-2 text-gray-400 text-xs' }, r.id || r.symbol)
+        ),
+        e('span', {
+          className: `text-xs px-2 py-0.5 rounded-full font-medium ${r.type === 'crypto' ? 'bg-orange-900 text-orange-300' : 'bg-blue-900 text-blue-300'}`
+        }, r.type === 'crypto' ? 'Krypto' : 'Aktie')
+      )
+    ))
+  );
+}
+
+// ─── CHART HELPERS ───────────────────────────────────────────────────────────
+const CHART_OPTS = (height) => ({
+  layout: { background: { color: '#030712' }, textColor: '#9ca3af' },
+  grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } },
+  crosshair: { mode: 1 },
+  rightPriceScale: { borderColor: '#374151', scaleMargins: { top: 0.1, bottom: 0.1 } },
+  timeScale: { borderColor: '#374151', timeVisible: true },
+  height,
+});
+
+function seriesFromIndicator(candles, raw) {
+  if (!raw?.length) return [];
+  const offset = candles.length - raw.length;
+  return raw.map((v, i) => {
+    const c = candles[offset + i];
+    return (v != null && c) ? { time: c.time, value: v } : null;
+  }).filter(Boolean);
+}
+
+// ─── CANDLE CHART ────────────────────────────────────────────────────────────
+function CandleChart({ candles, indicators }) {
+  const ref = useRef(null);
+  const chartRef = useRef(null);
+
+  useEffect(() => {
+    if (!ref.current || !candles?.length) return;
+    if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
+
+    const chart = LightweightCharts.createChart(ref.current, CHART_OPTS(300));
+    chartRef.current = chart;
+
+    const cs = chart.addCandlestickSeries({
+      upColor: '#22c55e', downColor: '#ef4444',
+      borderUpColor: '#22c55e', borderDownColor: '#ef4444',
+      wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+    });
+    cs.setData(candles);
+
+    const sma20Data = seriesFromIndicator(candles, indicators?.series?.sma20);
+    if (sma20Data.length) {
+      chart.addLineSeries({ color: '#60a5fa', lineWidth: 1, title: 'SMA20' }).setData(sma20Data);
+    }
+    const sma50Data = seriesFromIndicator(candles, indicators?.series?.sma50);
+    if (sma50Data.length) {
+      chart.addLineSeries({ color: '#f59e0b', lineWidth: 1, title: 'SMA50' }).setData(sma50Data);
+    }
+
+    const ro = new ResizeObserver(() => ref.current && chart.applyOptions({ width: ref.current.clientWidth }));
+    ro.observe(ref.current);
+    chart.timeScale().fitContent();
+    return () => { ro.disconnect(); chart.remove(); chartRef.current = null; };
+  }, [candles, indicators]);
+
+  return e('div', { ref, className: 'w-full rounded-xl overflow-hidden' });
+}
+
+// ─── RSI CHART ────────────────────────────────────────────────────────────────
+function RSIChart({ candles, indicators }) {
+  const ref = useRef(null);
+  const chartRef = useRef(null);
+
+  useEffect(() => {
+    if (!ref.current || !candles?.length) return;
+    if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
+
+    const chart = LightweightCharts.createChart(ref.current, {
+      ...CHART_OPTS(160),
+      rightPriceScale: { borderColor: '#374151', scaleMargins: { top: 0.05, bottom: 0.05 } },
+    });
+    chartRef.current = chart;
+
+    const rsiData = seriesFromIndicator(candles, indicators?.series?.rsi);
+    if (rsiData.length) {
+      // Farbige Linie: rot wenn >70, grün wenn <30
+      const rsiSeries = chart.addLineSeries({ color: '#a78bfa', lineWidth: 2, title: 'RSI(14)' });
+      rsiSeries.setData(rsiData);
+
+      // Overbought/Oversold Levels
+      const times = rsiData.map(d => d.time);
+      const ob = chart.addLineSeries({ color: '#ef444466', lineWidth: 1, lineStyle: 2, priceLineVisible: false });
+      ob.setData(times.map(t => ({ time: t, value: 70 })));
+      const os = chart.addLineSeries({ color: '#22c55e66', lineWidth: 1, lineStyle: 2, priceLineVisible: false });
+      os.setData(times.map(t => ({ time: t, value: 30 })));
+      const mid = chart.addLineSeries({ color: '#37415155', lineWidth: 1, lineStyle: 2, priceLineVisible: false });
+      mid.setData(times.map(t => ({ time: t, value: 50 })));
+    }
+
+    const ro = new ResizeObserver(() => ref.current && chart.applyOptions({ width: ref.current.clientWidth }));
+    ro.observe(ref.current);
+    chart.timeScale().fitContent();
+    return () => { ro.disconnect(); chart.remove(); chartRef.current = null; };
+  }, [candles, indicators]);
+
+  return e('div', { className: 'space-y-1' },
+    e('div', { className: 'flex items-center gap-3 px-1' },
+      e('span', { className: 'text-xs font-semibold text-purple-400' }, 'RSI (14)'),
+      e('span', { className: 'text-xs text-red-400' }, '— 70 Überkauft'),
+      e('span', { className: 'text-xs text-green-400' }, '— 30 Überverkauft'),
+    ),
+    e('div', { ref, className: 'w-full rounded-xl overflow-hidden' })
+  );
+}
+
+// ─── MACD CHART ───────────────────────────────────────────────────────────────
+function MACDChart({ candles, indicators }) {
+  const ref = useRef(null);
+  const chartRef = useRef(null);
+
+  useEffect(() => {
+    if (!ref.current || !candles?.length) return;
+    if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
+
+    const chart = LightweightCharts.createChart(ref.current, CHART_OPTS(160));
+    chartRef.current = chart;
+
+    const macdData = seriesFromIndicator(candles, indicators?.series?.macd);
+    const signalData = seriesFromIndicator(candles, indicators?.series?.macdSignal);
+
+    if (macdData.length && signalData.length) {
+      // Histogramm (MACD - Signal)
+      const minLen = Math.min(macdData.length, signalData.length);
+      const histData = macdData.slice(-minLen).map((d, i) => {
+        const sv = signalData[signalData.length - minLen + i]?.value ?? 0;
+        const diff = d.value - sv;
+        return { time: d.time, value: diff, color: diff >= 0 ? '#22c55e88' : '#ef444488' };
+      });
+      const hist = chart.addHistogramSeries({ priceLineVisible: false, title: 'Hist' });
+      hist.setData(histData);
+
+      // MACD Linie
+      chart.addLineSeries({ color: '#60a5fa', lineWidth: 2, title: 'MACD' }).setData(macdData);
+      // Signal Linie
+      chart.addLineSeries({ color: '#f97316', lineWidth: 1, title: 'Signal', lineStyle: 1 }).setData(signalData);
+
+      // Zero-Linie
+      const times = macdData.map(d => d.time);
+      chart.addLineSeries({ color: '#37415177', lineWidth: 1, lineStyle: 2, priceLineVisible: false })
+        .setData(times.map(t => ({ time: t, value: 0 })));
+    }
+
+    const ro = new ResizeObserver(() => ref.current && chart.applyOptions({ width: ref.current.clientWidth }));
+    ro.observe(ref.current);
+    chart.timeScale().fitContent();
+    return () => { ro.disconnect(); chart.remove(); chartRef.current = null; };
+  }, [candles, indicators]);
+
+  return e('div', { className: 'space-y-1' },
+    e('div', { className: 'flex items-center gap-3 px-1' },
+      e('span', { className: 'text-xs font-semibold text-blue-400' }, 'MACD (12,26,9)'),
+      e('span', { className: 'text-xs text-blue-400' }, '— MACD'),
+      e('span', { className: 'text-xs text-orange-400' }, '— Signal'),
+      e('span', { className: 'text-xs text-gray-500' }, '▌ Histogramm'),
+    ),
+    e('div', { ref, className: 'w-full rounded-xl overflow-hidden' })
+  );
+}
+
+// ─── SIGNAL CARD ─────────────────────────────────────────────────────────────
+function SignalCard({ signal }) {
+  if (!signal) return null;
+  const s = signal.signal || 'HOLD';
+  const colors = { BUY: 'border-green-500 bg-green-950', SELL: 'border-red-500 bg-red-950', HOLD: 'border-yellow-500 bg-yellow-950' };
+  const texts = { BUY: 'text-green-400', SELL: 'text-red-400', HOLD: 'text-yellow-400' };
+  const bars = { BUY: 'bg-green-500', SELL: 'bg-red-500', HOLD: 'bg-yellow-500' };
+  const emojis = { BUY: '📈', SELL: '📉', HOLD: '⏸️' };
+
+  return e('div', { className: `rounded-2xl border-2 p-5 bg-opacity-30 ${colors[s] || colors.HOLD}` },
+    e('div', { className: 'flex items-center justify-between mb-3' },
+      e('div', { className: 'flex items-center gap-3' },
+        e('span', { className: 'text-4xl' }, emojis[s]),
+        e('div', null,
+          e('div', { className: `text-3xl font-black ${texts[s]}` }, s),
+          e('div', { className: 'text-gray-400 text-xs' }, 'KI-Signal (Gemini)')
+        )
+      ),
+      e('div', { className: 'text-right' },
+        e('div', { className: 'text-3xl font-bold text-white' }, signal.confidence + '%'),
+        e('div', { className: 'text-gray-400 text-xs' }, 'Konfidenz')
+      )
+    ),
+    e('div', { className: 'w-full bg-gray-800 rounded-full h-2 mb-4' },
+      e('div', { className: `h-2 rounded-full ${bars[s]}`, style: { width: signal.confidence + '%', transition: 'width 0.7s' } })
+    ),
+    signal.timeframe && e('div', { className: 'flex items-center gap-2 mb-3' },
+      e('span', { className: 'text-xs bg-gray-800 text-blue-300 px-3 py-1 rounded-full border border-blue-900' }, '⏱ ' + signal.timeframe)
+    ),
+    e('p', { className: 'text-gray-300 text-sm leading-relaxed mb-4' }, signal.reasoning),
+    signal.targets && e('div', { className: 'grid grid-cols-3 gap-3 mb-4' },
+      [
+        { label: 'Einstieg', value: signal.targets.entry, cls: 'text-blue-400' },
+        { label: 'Take Profit', value: signal.targets.takeProfit, cls: 'text-green-400' },
+        { label: 'Stop Loss', value: signal.targets.stopLoss, cls: 'text-red-400' },
+      ].map(({ label, value, cls }) =>
+        e('div', { key: label, className: 'bg-gray-800 bg-opacity-60 rounded-xl p-3 text-center' },
+          e('div', { className: `font-semibold text-sm ${cls}` },
+            value != null ? Number(value).toLocaleString('de-DE', { maximumFractionDigits: 4 }) : '—'
+          ),
+          e('div', { className: 'text-gray-500 text-xs mt-0.5' }, label)
+        )
+      )
+    ),
+    signal.keyFactors?.length > 0 && e('div', { className: 'flex flex-wrap gap-2' },
+      signal.keyFactors.map((f, i) =>
+        e('span', { key: i, className: 'bg-gray-800 text-gray-300 text-xs px-3 py-1 rounded-full' }, f)
+      )
+    )
+  );
+}
+
+// ─── INDICATOR PANEL ─────────────────────────────────────────────────────────
+function Stat({ label, value, cls }) {
+  return e('div', { className: 'bg-gray-800 bg-opacity-60 rounded-xl p-3' },
+    e('div', { className: 'text-gray-500 text-xs mb-1' }, label),
+    e('div', { className: `font-semibold text-sm ${cls || 'text-gray-100'}` },
+      value != null ? (typeof value === 'number' ? Number(value).toLocaleString('de-DE', { maximumFractionDigits: 4 }) : value) : '—'
+    )
+  );
+}
+
+function IndicatorPanel({ ind, fund }) {
+  if (!ind) return null;
+  const macdBull = ind.macd != null && ind.macdSignal != null && ind.macd > ind.macdSignal;
+  const rsiColor = ind.rsi >= 70 ? 'text-red-400' : ind.rsi <= 30 ? 'text-green-400' : 'text-gray-100';
+
+  return e('div', { className: 'space-y-4' },
+    e('h3', { className: 'text-xs font-semibold text-gray-400 uppercase tracking-wider' }, 'Technische Indikatoren'),
+    e('div', { className: 'grid grid-cols-2 sm:grid-cols-3 gap-3' },
+      e(Stat, { label: 'RSI (14)', value: ind.rsi, cls: rsiColor }),
+      e(Stat, { label: 'MACD', value: ind.macd != null ? `${Number(ind.macd).toFixed(4)} ${macdBull ? '↑ bullish' : '↓ bearish'}` : null, cls: macdBull ? 'text-green-400' : 'text-red-400' }),
+      e(Stat, { label: 'SMA 20', value: ind.sma20 }),
+      e(Stat, { label: 'SMA 50', value: ind.sma50 }),
+      e(Stat, { label: 'SMA 200', value: ind.sma200 }),
+      e(Stat, { label: 'BB Upper', value: ind.bbUpper }),
+      e(Stat, { label: 'BB Lower', value: ind.bbLower }),
+      e(Stat, { label: 'Aktueller Preis', value: ind.currentPrice, cls: 'text-white font-bold' }),
+    ),
+    fund && Object.keys(fund).length > 0 && e('div', null,
+      e('h3', { className: 'text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3' }, 'Fundamentaldaten'),
+      e('div', { className: 'grid grid-cols-2 sm:grid-cols-3 gap-3' },
+        fund.pe != null && e(Stat, { key: 'pe', label: 'KGV (P/E)', value: Number(fund.pe).toFixed(2) }),
+        fund.eps != null && e(Stat, { key: 'eps', label: 'EPS', value: Number(fund.eps).toFixed(2) }),
+        fund.beta != null && e(Stat, { key: 'beta', label: 'Beta', value: Number(fund.beta).toFixed(2) }),
+        fund.dividendYield != null && e(Stat, { key: 'div', label: 'Dividende', value: `${(fund.dividendYield * 100).toFixed(2)}%` }),
+        fund.marketCap != null && e(Stat, { key: 'mc', label: 'Marktkapital.', value: fund.marketCap >= 1e12 ? `${(fund.marketCap/1e12).toFixed(2)}T` : fund.marketCap >= 1e9 ? `${(fund.marketCap/1e9).toFixed(2)}B` : `${(fund.marketCap/1e6).toFixed(0)}M` }),
+        fund['52wHigh'] != null && e(Stat, { key: '52h', label: '52W Hoch', value: fund['52wHigh'] }),
+        fund['52wLow'] != null && e(Stat, { key: '52l', label: '52W Tief', value: fund['52wLow'] }),
+        fund.priceChange24h != null && e(Stat, { key: 'ch', label: '24h Änderung', value: `${Number(fund.priceChange24h).toFixed(2)}%`, cls: fund.priceChange24h >= 0 ? 'text-green-400' : 'text-red-400' }),
+      )
+    )
+  );
+}
+
+// ─── NEWS TAB ────────────────────────────────────────────────────────────────
+function NewsTab({ news, symbol }) {
+  if (!news?.length) return e('div', { className: 'bg-gray-900 rounded-2xl border border-gray-800 p-8 text-center' },
+    e('div', { className: 'text-4xl mb-3' }, '📭'),
+    e('p', { className: 'text-gray-400 text-sm' }, 'Keine Nachrichten gefunden für ' + symbol)
+  );
+
+  return e('div', { className: 'space-y-3' },
+    e('div', { className: 'flex items-center justify-between' },
+      e('h3', { className: 'text-sm font-semibold text-gray-400 uppercase tracking-wider' }, `📰 ${news.length} aktuelle Nachrichten`),
+      e('span', { className: 'text-xs text-gray-600' }, 'Reuters · Yahoo Finance · CNBC · MarketWatch')
+    ),
+    ...news.map((article, i) =>
+      e('a', {
+        key: i,
+        href: article.link || '#',
+        target: '_blank',
+        rel: 'noopener noreferrer',
+        className: 'block bg-gray-900 border border-gray-800 hover:border-gray-600 rounded-2xl p-4 transition-colors group'
+      },
+        e('div', { className: 'flex items-start justify-between gap-3 mb-2' },
+          e('span', { className: 'text-xs bg-gray-800 text-blue-300 px-2 py-0.5 rounded-full whitespace-nowrap' }, article.source),
+          article.published && e('span', { className: 'text-xs text-gray-600 whitespace-nowrap' },
+            (() => { try { return new Date(article.published).toLocaleDateString('de-DE', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }); } catch { return ''; } })()
+          )
+        ),
+        e('h4', { className: 'font-semibold text-sm text-white group-hover:text-blue-400 transition-colors mb-1 leading-snug' }, article.title),
+        article.summary && e('p', { className: 'text-gray-400 text-xs leading-relaxed line-clamp-2' }, article.summary)
+      )
+    )
+  );
+}
+
+// ─── MODEL SELECTOR ──────────────────────────────────────────────────────────
+function ModelSelector({ value, onChange }) {
+  const [models, setModels] = useState([]);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    apiModels().then(d => {
+      if (d.models?.length) setModels(d.models);
+      if (d.active) onChange(d.active);
+    }).catch(() => {});
+  }, []);
+
+  const current = models.find(m => m.id === value);
+
+  if (!models.length) return e('div', { className: 'text-xs text-gray-600 px-2' }, '⚙️ ' + value);
+
+  return e('div', { className: 'relative' },
+    e('button', {
+      onClick: () => setOpen(o => !o),
+      className: 'flex items-center gap-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-300 transition-colors whitespace-nowrap'
+    },
+      e('span', null, '🤖'),
+      e('span', { className: 'max-w-32 truncate' }, current?.name || value),
+      e('span', null, open ? '▲' : '▼')
+    ),
+    open && e('div', { className: 'absolute right-0 top-8 z-50 bg-gray-800 border border-gray-700 rounded-xl shadow-2xl overflow-hidden min-w-56' },
+      e('div', { className: 'px-3 py-2 text-xs text-gray-500 border-b border-gray-700' }, 'Gemini Modell wählen'),
+      e('ul', { className: 'max-h-64 overflow-y-auto' },
+        models.map(m => e('li', {
+          key: m.id,
+          onClick: () => { onChange(m.id); setOpen(false); },
+          className: `px-4 py-2.5 text-xs cursor-pointer transition-colors hover:bg-gray-700 flex items-center justify-between gap-2 ${m.id === value ? 'text-blue-400 bg-gray-700' : 'text-gray-300'}`
+        },
+          e('span', null, m.name || m.id),
+          m.id === value && e('span', null, '✓')
+        ))
+      )
+    )
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+const PERIODS = [['1M','1mo'],['3M','3mo'],['6M','6mo'],['1J','1y'],['2J','2y']];
+const QUICK = [
+  { type:'stock', id:'AAPL', name:'Apple' },
+  { type:'stock', id:'NVDA', name:'NVIDIA' },
+  { type:'stock', id:'MSFT', name:'Microsoft' },
+  { type:'crypto', id:'bitcoin', name:'Bitcoin' },
+  { type:'crypto', id:'ethereum', name:'Ethereum' },
+  { type:'stock', id:'SPY', name:'S&P 500 ETF' },
+];
+
+function App() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [period, setPeriod] = useState('6mo');
+  const [active, setActive] = useState(null);
+  const [tab, setTab] = useState('chart');
+  const [model, setModel] = useState('gemini-1.5-flash');
+
+  // KI-State
+  const [signal, setSignal] = useState(null);
+  const [signalLoading, setSignalLoading] = useState(false);
+  const [signalError, setSignalError] = useState(null);
+  const [userContext, setUserContext] = useState('');
+
+  async function load(asset, p) {
+    const per = p || period;
+    setLoading(true); setError(null); setSignal(null);
+    try {
+      const result = await apiData(asset.type, asset.id, per);
+      setData(result); setActive(asset);
+    } catch(err) {
+      setError('Fehler beim Laden: ' + err.message);
+    }
+    setLoading(false);
+  }
+
+  async function runSignal() {
+    if (!data || !active) return;
+    setSignalLoading(true); setSignalError(null);
+    try {
+      const result = await apiSignal(active.type, active.id, {
+        candles: data.candles,
+        fundamentals: data.fundamentals,
+        indicators: data.indicators,
+        news: data.news,
+        userContext,
+        model,
+      });
+      setSignal(result);
+      setTab('signal');
+    } catch(err) {
+      setSignalError('Fehler: ' + err.message);
+    }
+    setSignalLoading(false);
+  }
+
+  const sigColor = { BUY:'from-green-950', SELL:'from-red-950', HOLD:'from-gray-950' };
+  const sig = data?.signal?.signal || 'HOLD';
+
+  return e('div', { className: 'min-h-screen bg-gray-950' },
+
+    // HEADER
+    e('header', { className: 'border-b border-gray-800 px-4 py-4 sticky top-0 z-40', style: { background: 'rgba(3,7,18,0.96)', backdropFilter: 'blur(8px)' } },
+      e('div', { className: 'max-w-4xl mx-auto flex items-center gap-3' },
+        e('div', { className: 'text-xl font-black whitespace-nowrap' },
+          e('span', { className: 'text-blue-400' }, 'Trader'),
+          e('span', { className: 'text-white' }, 'Life')
+        ),
+        e(SearchBar, { onSelect: (a) => { setTab('chart'); load(a); } }),
+        e(ModelSelector, { value: model, onChange: (m) => setModel(m) })
+      )
+    ),
+
+    // MAIN
+    e('main', { className: 'max-w-4xl mx-auto px-4 py-6 space-y-5' },
+
+      // Startscreen
+      !data && !loading && e('div', { className: 'text-center py-20' },
+        e('div', { className: 'text-6xl mb-4' }, '📊'),
+        e('h1', { className: 'text-2xl font-bold mb-2 text-white' }, 'KI-Marktanalyse'),
+        e('p', { className: 'text-gray-400 text-sm max-w-xs mx-auto mb-6' }, 'Aktien, ETFs und Krypto mit technischen Indikatoren und Gemini KI-Signalen'),
+        e('div', { className: 'flex flex-wrap justify-center gap-2' },
+          QUICK.map(a => e('button', {
+            key: a.id,
+            className: 'bg-gray-800 hover:bg-gray-700 text-sm px-4 py-2 rounded-full transition-colors text-white border border-gray-700',
+            onClick: () => load(a)
+          }, a.name))
+        )
+      ),
+
+      // Loading
+      loading && e('div', { className: 'flex flex-col items-center justify-center py-20 gap-4' },
+        e('div', { className: 'spinner' }),
+        e('p', { className: 'text-gray-400 text-sm' }, '⏳ Marktdaten laden & KI analysiert…')
+      ),
+
+      // Error
+      error && e('div', { className: 'bg-red-950 border border-red-800 rounded-xl p-4 text-red-300 text-sm' }, error),
+
+      // Dashboard
+      data && !loading && e('div', { className: 'space-y-4' },
+
+        // Asset Header
+        e('div', { className: `rounded-2xl bg-gradient-to-br ${sigColor[sig]} to-gray-900 border border-gray-800 p-5` },
+          e('div', { className: 'flex items-start justify-between flex-wrap gap-3 mb-4' },
+            e('div', null,
+              e('h2', { className: 'text-xl font-black text-white' }, data.fundamentals?.name || data.symbol || data.coin),
+              e('p', { className: 'text-gray-400 text-sm' }, data.fundamentals?.sector || (active?.type === 'crypto' ? 'Kryptowährung' : 'Aktie / ETF'))
+            ),
+            e('div', { className: 'text-right' },
+              e('div', { className: 'text-2xl font-black text-white' },
+                data.indicators?.currentPrice?.toLocaleString('de-DE', { maximumFractionDigits: 4 })
+              ),
+              data.fundamentals?.priceChange24h != null && e('div', {
+                className: `text-sm font-medium ${data.fundamentals.priceChange24h >= 0 ? 'text-green-400' : 'text-red-400'}`
+              }, `${data.fundamentals.priceChange24h >= 0 ? '+' : ''}${Number(data.fundamentals.priceChange24h).toFixed(2)}%`)
+            )
+          ),
+          e('div', { className: 'flex gap-1' },
+            PERIODS.map(([label, val]) => e('button', {
+              key: val,
+              onClick: () => { setPeriod(val); load(active, val); },
+              className: `px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${period === val ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`
+            }, label))
+          )
+        ),
+
+        // Tabs
+        e('div', { className: 'flex gap-1 bg-gray-900 rounded-xl p-1 border border-gray-800' },
+          [['chart','📊 Chart'],['signal','🤖 Signal'],['indicators','📈 Daten'],['news','📰 News']].map(([id, label]) =>
+            e('button', {
+              key: id, onClick: () => setTab(id),
+              className: `flex-1 py-2 px-1 rounded-lg text-xs sm:text-sm font-medium transition-colors ${tab === id ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white'}`
+            }, label)
+          )
+        ),
+
+        // Tab content
+        tab === 'chart' && e('div', { className: 'bg-gray-900 rounded-2xl border border-gray-800 p-4 space-y-4' },
+          e(CandleChart, { candles: data.candles, indicators: data.indicators }),
+          e('div', { className: 'border-t border-gray-800 pt-3' }, e(RSIChart, { candles: data.candles, indicators: data.indicators })),
+          e('div', { className: 'border-t border-gray-800 pt-3' }, e(MACDChart, { candles: data.candles, indicators: data.indicators })),
+        ),
+        tab === 'signal' && e('div', { className: 'space-y-4' },
+          // KI-Analyse Panel
+          e('div', { className: 'bg-gray-900 border border-gray-800 rounded-2xl p-4 space-y-3' },
+            e('div', { className: 'text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1' }, '🤖 KI-Analyse mit Gemini'),
+            e('textarea', {
+              className: 'w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm text-white placeholder-gray-500 outline-none focus:border-blue-500 resize-none',
+              rows: 3,
+              placeholder: 'Optional: Spezifische Frage stellen, z.B. "Wie verhält sich die Aktie bei steigenden Zinsen?" oder "Gibt es Anzeichen für einen Breakout?"',
+              value: userContext,
+              onChange: ev => setUserContext(ev.target.value),
+            }),
+            e('button', {
+              onClick: runSignal,
+              disabled: signalLoading,
+              className: `w-full py-3 rounded-xl font-semibold text-sm transition-colors ${signalLoading ? 'bg-gray-700 text-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500 text-white'}`,
+            },
+              signalLoading
+                ? e('span', { className: 'flex items-center justify-center gap-2' }, e('span', { className: 'spinner', style: {width:'16px',height:'16px',borderWidth:'2px'} }), 'Gemini analysiert…')
+                : '🔍 KI-Analyse starten'
+            ),
+            signalError && e('div', { className: 'bg-red-950 border border-red-800 rounded-xl p-3 text-red-300 text-xs' }, signalError),
+          ),
+          signal && e(SignalCard, { signal }),
+          !signal && !signalLoading && e('div', { className: 'text-center py-8 text-gray-600 text-sm' },
+            '↑ Analyse starten um ein KI-Signal zu erhalten'
+          )
+        ),
+        tab === 'indicators' && e('div', { className: 'bg-gray-900 rounded-2xl border border-gray-800 p-5' },
+          e(IndicatorPanel, { ind: data.indicators, fund: data.fundamentals })
+        ),
+        tab === 'news' && e(NewsTab, { news: data.news, symbol: data.symbol || data.coin }),
+
+        // Daten neu laden
+        e('button', {
+          onClick: () => load(active),
+          className: 'w-full bg-gray-800 hover:bg-gray-700 text-gray-300 font-medium py-2.5 rounded-xl transition-colors text-sm border border-gray-700'
+        }, '🔄 Marktdaten aktualisieren')
+      )
+    ),
+
+    e('footer', { className: 'text-center text-gray-700 text-xs py-6' }, 'TraderLife · Keine Anlageberatung · Auf eigenes Risiko')
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(e(App));
+</script>
+</body>
+</html>
