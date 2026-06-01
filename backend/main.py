@@ -22,6 +22,9 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 STATIC = pathlib.Path(__file__).parent / "static"
 if STATIC.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+    # LIGA: relativer <script src="liga/..."> löst zu /liga/... auf
+    if (STATIC / "liga").exists():
+        app.mount("/liga", StaticFiles(directory=str(STATIC / "liga")), name="liga")
 
 @app.get("/", include_in_schema=False)
 def root():
@@ -37,6 +40,14 @@ try:
 except Exception:
     ACTIVE_MODEL = "gemini-2.5-flash"
 print(f"[TraderLife] Modell: {ACTIVE_MODEL}")
+
+# ── LIGA (Fantasy-Trading-Wettbewerb) ──────────────────────────────────────
+try:
+    from liga_backend import register_liga
+    register_liga(app, lambda: gemini_client, lambda: ACTIVE_MODEL)
+    print("[TraderLife] Liga-Endpunkte aktiv")
+except Exception as _liga_ex:
+    print(f"[TraderLife] Liga konnte nicht geladen werden: {_liga_ex}")
 
 
 # ── MARKTDATEN ────────────────────────────────────────────────────────────────

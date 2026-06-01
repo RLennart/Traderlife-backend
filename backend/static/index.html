@@ -27,6 +27,9 @@ tailwind.config = {
 </head>
 <body>
 <div id="root"></div>
+<!-- LIGA-Modul (eigene Skripte, kapseln sich via IIFE → keine Namenskonflikte) -->
+<script src="liga/store.js"></script>
+<script src="liga/components.js"></script>
 <script>
 const { useState, useEffect, useRef, useCallback } = React;
 const e = React.createElement;
@@ -572,6 +575,7 @@ const QUICK = [
 ];
 
 function App() {
+  const [view, setView] = useState(() => localStorage.getItem('tl_view') || 'analyse');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -634,7 +638,7 @@ function App() {
 
     // HEADER
     e('header', { className: 'border-b border-gray-800 px-4 py-4 sticky top-0 z-40', style: { background: 'rgba(3,7,18,0.96)', backdropFilter: 'blur(8px)' } },
-      e('div', { className: 'max-w-4xl mx-auto flex items-center gap-3' },
+      e('div', { className: 'max-w-4xl mx-auto flex items-center gap-3 flex-wrap' },
         e('div', { className: 'whitespace-nowrap' },
           e('div', { className: 'text-xl font-black leading-tight' },
             e('span', { className: 'text-blue-400' }, 'Trader'),
@@ -642,12 +646,24 @@ function App() {
           ),
           e('div', { className: 'text-xs text-purple-400 font-medium tracking-wide leading-tight' }, 'Secret GARRda Edition')
         ),
-        e(SearchBar, { onSelect: (a) => { setTab('chart'); load(a); } }),
-        e('span', { className: 'text-xs text-gray-600 hidden sm:block whitespace-nowrap' }, '🤖 gemini-2.5-flash')
+        e('nav', { className: 'flex gap-1 bg-gray-900 rounded-xl p-1 border border-gray-800 ml-auto order-2 sm:order-none' },
+          [['analyse', '📊 Analyse'], ['liga', '🏆 Liga']].map(([id, label]) =>
+            e('button', {
+              key: id,
+              onClick: () => { setView(id); localStorage.setItem('tl_view', id); },
+              className: `px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${view === id ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white'}`
+            }, label)
+          )
+        ),
+        view === 'analyse' && e('div', { className: 'flex-1 min-w-[180px] order-3 sm:order-none w-full sm:w-auto' },
+          e(SearchBar, { onSelect: (a) => { setTab('chart'); load(a); } })
+        ),
+        view === 'analyse' && e('span', { className: 'text-xs text-gray-600 hidden sm:block whitespace-nowrap' }, '🤖 gemini-2.5-flash')
       )
     ),
 
     // MAIN
+    view === 'liga' ? e(window.LigaApp) :
     e('main', { className: 'max-w-4xl mx-auto px-4 py-6 space-y-5' },
 
       // Startscreen
